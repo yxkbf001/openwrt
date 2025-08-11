@@ -1,0 +1,102 @@
+#!/bin/sh
+# OpenWrt 一键插件安装（断点续装版）
+# 保存为 install_plugins.sh；在路由器上 chmod +x 后运行
+
+#================= 可修改区域 =================
+PLUGINS="\
+luci-theme-argon \
+openssh-sftp-server \
+luci-i18n-diskman-zh-cn \
+luci-i18n-homeproxy-zh-cn \
+luci-i18n-ddns-go-zh-cn \
+luci-i18n-dockerman-zh-cn \
+"
+RETRY_MAX=3             # 失败重试次数
+RETRY_SLEEP_BASE=3      # 指数退避基数（秒）
+#=============================================
+
+LOG_DIR="/root"
+TS="$(date +%Y%m%d_%H%M%S)"
+LOG_FILE="$LOG_DIR/opkg_install_${TS}.log"
+
+log() {
+  printf '%s %s\n' "$(date '+%F %T')" "$*" | tee -a "$LOG_FILE"
+}
+
+is_installed() {
+  opkg status "$1" 2>/dev/null | grep -q "^Status: .* installed"
+}
+
+opkg_update_once() {
+  FLAG="/tmp/.opkg_updated_once"
+  if [ -f "$FLAG" ]; then
+    log "本会话已更新过软件源，跳过。"
+    return 0
+  fi
+  n=1
+  while [ $n -le $RETRY_MAX ]; do
+    log "opkg update (第 $n/$RETRY_MAX 次)"
+    if opkg update >>"$LOG_FILE" 2>&1; then
+      touch "$FLAG"
+      log "opkg update 成功。"
+      return 0
+    fi
+    SLEEP=$((RETRY_SLEEP_BASE ** n))
+    log "opkg update 失败，$SLEEP 秒后重试…"
+    sleep "$SLEEP"; n=$((n+1))
+  done
+  log "opkg update 多次失败，请检查网络/源。"
+  return 1
+}
+
+install_pkg_with_retry() {
+  PKG="$1"
+  n=1
+  while [ $n -le $RETRY_MAX ]; do
+    log "安装 $PKG (第 $n/$RETRY_MAX 次)…"
+    if opkg install "$PKG" >>"$LOG_FILE" 2>&1; then
+      log "安装成功：$PKG"
+      return 0
+    fi
+    SLEEP=$((RETRY_SLEEP_BASE ** n))
+    log "安装失败：$PKG，$SLEEP 秒后重试…"
+    sleep "$SLEEP"; n=$((n+1))
+  done
+  return 1
+}
+
+main() {
+  [ "$(id -u)" -ne 0 ] && { echo "请用 root 运行。"; exit 1; }
+  log "==== OpenWrt 插件一键安装开始 ===="
+  log "日志文件：$LOG_FILE"
+
+  if ! opkg_update_once; then
+    log "由于 opkg update 失败，终止安装。"; exit 1
+  fi
+
+  FAILED=""; SKIPPED=""; DONE=""
+  for pkg in $PLUGINS; do
+    if is_installed "$pkg"; then
+      log "已安装，跳过：$pkg"; SKIPPED="$SKIPPED $pkg"; continue
+    fi
+    if install_pkg_with_retry "$pkg"; then
+      DONE="$DONE $pkg"
+    else
+      log "多次失败，放弃：$pkg"; FAILED="$FAILED $pkg"
+    fi
+  done
+
+  echo >>"$LOG_FILE"
+  log "==== 安装结果汇总 ===="
+  [ -n "$DONE" ]    && log "成功安装：$DONE"
+  [ -n "$SKIPPED" ] && log "已存在(跳过)：$SKIPPED"
+  if [ -n "$FAILED" ]; then
+    log "安装失败：$FAILED"
+    log "再次运行脚本会自动续装，或查看日志：$LOG_FILE"
+    exit 2
+  else
+    log "全部处理完成，无失败项。"; exit 0
+  fi
+}
+
+main "$@"
