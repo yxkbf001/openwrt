@@ -2,14 +2,8 @@
 # OpenWrt 一键插件安装（断点续装 + 确认提示版）
 
 #================= 可修改区域 =================
-PLUGINS="\
-luci-theme-argon \
-openssh-sftp-server \
-luci-i18n-diskman-zh-cn \
-luci-i18n-homeproxy-zh-cn \
-luci-i18n-ddns-go-zh-cn \
-luci-i18n-dockerman-zh-cn \
-"
+# 用空格分隔，避免多行反斜杠带来的解析问题
+PLUGINS="luci-theme-argon openssh-sftp-server luci-i18n-diskman-zh-cn luci-i18n-homeproxy-zh-cn luci-i18n-ddns-go-zh-cn luci-i18n-dockerman-zh-cn"
 RETRY_MAX=3             # 安装失败时重试次数
 RETRY_SLEEP_BASE=3      # 每次重试的基础等待秒数（指数回退）
 #=============================================
@@ -26,7 +20,6 @@ is_installed() {
   opkg status "$1" 2>/dev/null | grep -q "^Status: .* installed"
 }
 
-# 只在确认后才执行 update
 opkg_update_once() {
   FLAG="/tmp/.opkg_updated_once"
   if [ -f "$FLAG" ]; then
@@ -83,7 +76,6 @@ list_pending() {
 main() {
   [ "$(id -u)" -ne 0 ] && { echo "请用 root 运行。"; exit 1; }
 
-  # 先计算待安装清单（不触发 update）
   PENDING="$(list_pending)"
 
   echo "==========================================="
@@ -125,4 +117,33 @@ main() {
   SKIPPED=""
   DONE=""
 
-  # 已安装的跳过，仅对 PE
+  for pkg in $PENDING; do
+    if is_installed "$pkg"; then
+      log "已安装，跳过：$pkg"
+      SKIPPED="$SKIPPED $pkg"
+      continue
+    fi
+
+    if install_pkg_with_retry "$pkg"; then
+      DONE="$DONE $pkg"
+    else
+      log "多次失败，放弃：$pkg"
+      FAILED="$FAILED $pkg"
+    fi
+  done
+
+  echo >>"$LOG_FILE"
+  log "==== 安装结果汇总 ===="
+  [ -n "$DONE" ]    && log "成功安装：$DONE"
+  [ -n "$SKIPPED" ] && log "已存在(跳过)：$SKIPPED"
+  if [ -n "$FAILED" ]; then
+    log "安装失败：$FAILED"
+    log "可稍后再次运行脚本自动续装，或查看日志排查：$LOG_FILE"
+    exit 2
+  else
+    log "全部处理完成，无失败项。"
+    exit 0
+  fi
+}
+
+main "$@"
